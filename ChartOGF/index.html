@@ -104,7 +104,7 @@
 
     #legend-title {
       font-weight: bold;
-      font-size: 0.82rem;
+      font-size: 1.14em;
       user-select: text;
       -webkit-user-select: text;
       white-space: pre-wrap;
@@ -1658,9 +1658,13 @@
       const editor = document.getElementById('legend-editor');
       const display = document.getElementById('legend-display');
       const mapLegendBox = document.getElementById('map-legend');
+      const titleEl = document.getElementById('legend-title');
       const usedColors = [...new Set(Object.values(countryColors))];
       
       mapLegendBox.style.fontSize = (0.72 * userTextScaleMultiplier) + 'rem';
+      if (titleEl) {
+        titleEl.style.fontSize = (0.82 * userTextScaleMultiplier) + 'rem';
+      }
 
       if (usedColors.length === 0) {
         editor.innerHTML = '<em style="font-size: 0.8rem; color: #666;">Click countries or subdivisions to assign colors and generate legend items.</em>';
