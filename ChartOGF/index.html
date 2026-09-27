@@ -35,6 +35,11 @@
       text-rendering: geometricPrecision;
     }
 
+    /* Paint Tool Cursor Overlay */
+    .leaflet-container.paint-tool-active {
+      cursor: crosshair !important;
+    }
+
     .control-group { display: flex; flex-direction: column; gap: 6px; }
     label { font-size: 0.85rem; font-weight: bold; color: #333; display: flex; justify-content: space-between; align-items: center; }
     select, button, input[type="text"] { width: 100%; height: 35px; border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; background: white; font-size: 0.85rem; }
@@ -43,10 +48,29 @@
     button:disabled { background: #cccccc !important; cursor: not-allowed; }
     input[type="range"] { width: 100%; cursor: pointer; }
 
-    /* Active Color Input Bar */
-    .active-color-wrapper { display: flex; gap: 8px; align-items: center; }
-    .active-color-picker { width: 50px; height: 36px; padding: 0; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: white; }
-    .color-hex-label { font-family: monospace; font-size: 0.9rem; color: #555; }
+    /* Active Color Input Bar & Dynamic Paint Tools Toolbar */
+    .active-color-wrapper { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; }
+    .active-color-picker { width: 42px; height: 36px; padding: 0; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: white; flex-shrink: 0; }
+    .color-hex-label { font-family: monospace; font-size: 0.85rem; color: #555; flex-shrink: 0; min-width: 60px; }
+    
+    .paint-tools-toolbar { display: flex; gap: 3px; align-items: center; margin-left: auto; }
+    .paint-tool-btn { 
+      width: 32px; 
+      height: 32px; 
+      padding: 0; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      background: #ffffff; 
+      color: #333; 
+      border: 1px solid #ccc; 
+      border-radius: 4px; 
+      cursor: pointer; 
+      font-size: 0.95rem;
+      transition: all 0.15s ease;
+    }
+    .paint-tool-btn:hover { background: #e9ecef; border-color: #adb5bd; }
+    .paint-tool-btn.active { background: #007bff; color: white; border-color: #0056b3; font-weight: bold; box-shadow: inset 0 1px 3px rgba(0,0,0,0.25); }
 
     /* Legend Builder in Sidebar */
     .legend-box { background: white; padding: 10px; border-radius: 4px; border: 1px solid #ddd; }
@@ -198,12 +222,20 @@
       <input type="range" id="basemapOpacity" min="0" max="1" step="0.05" value="0.8" autocomplete="off">
     </div>
 
-    <!-- Color Picker Input -->
+    <!-- Active Color Picker & Paint Tools Bar -->
     <div class="control-group">
-      <label for="fillColor">Active Fill Color</label>
+      <label for="fillColor">Active Color & Paint Tools</label>
       <div class="active-color-wrapper">
         <input type="color" id="fillColor" class="active-color-picker" value="#3388ff" autocomplete="off">
         <span id="hexVal" class="color-hex-label">#3388FF</span>
+        
+        <!-- Interactive Painting Tools toolbar -->
+        <div class="paint-tools-toolbar">
+          <button type="button" id="toolPointer" class="paint-tool-btn active" title="Pointer (Single Click Mode)">👆</button>
+          <button type="button" id="toolBox" class="paint-tool-btn" title="Box Paint Tool">📦</button>
+          <button type="button" id="toolLasso" class="paint-tool-btn" title="Lasso Paint Tool">🪢</button>
+          <button type="button" id="toolBrush" class="paint-tool-btn" title="Wide Paintbrush Tool">🖌️</button>
+        </div>
       </div>
     </div>
 
@@ -369,9 +401,6 @@
     });
 
     const fillColorPicker = document.getElementById('fillColor');
-    fillColorPicker.addEventListener('input', (e) => {
-      document.getElementById('hexVal').textContent = e.target.value.toUpperCase();
-    });
 
     const fillOpacityPicker = document.getElementById('fillOpacity');
 
@@ -480,6 +509,265 @@
     let activeNumberedLabels = [];
     let isAdjustingLabels = false;
 
+    // --- DYNAMIC PAINT TOOLS STATE & ENGINE ---
+    let activePaintTool = 'pointer'; // 'pointer', 'box', 'lasso', 'brush'
+    let isBoxDrawing = false, boxStartLatLng = null, boxRectLayer = null;
+    let isLassoDrawing = false, lassoPoints = [], lassoPolyLayer = null;
+    let isBrushing = false, brushRadiusPx = 25, brushMarker = null;
+    const brushedInCurrentStroke = new Set();
+
+    const toolPointerBtn = document.getElementById('toolPointer');
+    const toolBoxBtn = document.getElementById('toolBox');
+    const toolLassoBtn = document.getElementById('toolLasso');
+    const toolBrushBtn = document.getElementById('toolBrush');
+
+    function setPaintTool(toolName) {
+      // Clear ongoing drawing operations if switching tools mid-drag
+      if (isBoxDrawing && boxRectLayer) { map.removeLayer(boxRectLayer); boxRectLayer = null; }
+      if (isLassoDrawing && lassoPolyLayer) { map.removeLayer(lassoPolyLayer); lassoPolyLayer = null; }
+      isBoxDrawing = false;
+      isLassoDrawing = false;
+      isBrushing = false;
+      brushedInCurrentStroke.clear();
+
+      activePaintTool = toolName;
+
+      [toolPointerBtn, toolBoxBtn, toolLassoBtn, toolBrushBtn].forEach(btn => btn.classList.remove('active'));
+
+      if (toolName === 'pointer') toolPointerBtn.classList.add('active');
+      if (toolName === 'box') toolBoxBtn.classList.add('active');
+      if (toolName === 'lasso') toolLassoBtn.classList.add('active');
+      if (toolName === 'brush') toolBrushBtn.classList.add('active');
+
+      if (activePaintTool === 'pointer') {
+        map.dragging.enable();
+        map.doubleClickZoom.enable();
+        L.DomUtil.removeClass(map.getContainer(), 'paint-tool-active');
+        removeBrushCursor();
+      } else {
+        map.dragging.disable();
+        map.doubleClickZoom.disable();
+        L.DomUtil.addClass(map.getContainer(), 'paint-tool-active');
+        if (activePaintTool === 'brush') {
+          setupBrushCursor();
+        } else {
+          removeBrushCursor();
+        }
+      }
+    }
+
+    toolPointerBtn.addEventListener('click', () => setPaintTool('pointer'));
+    toolBoxBtn.addEventListener('click', () => setPaintTool('box'));
+    toolLassoBtn.addEventListener('click', () => setPaintTool('lasso'));
+    toolBrushBtn.addEventListener('click', () => setPaintTool('brush'));
+
+    function getBrushRadiusMeters(latlng) {
+      if (!latlng) return 10000;
+      const centerPt = map.latLngToContainerPoint(latlng);
+      const edgePt = L.point(centerPt.x + brushRadiusPx, centerPt.y);
+      const edgeLatLng = map.containerPointToLatLng(edgePt);
+      return latlng.distanceTo(edgeLatLng);
+    }
+
+    function setupBrushCursor() {
+      if (!brushMarker) {
+        brushMarker = L.circle(map.getCenter(), {
+          radius: getBrushRadiusMeters(map.getCenter()),
+          color: fillColorPicker.value,
+          weight: 1.5,
+          fillColor: fillColorPicker.value,
+          fillOpacity: 0.3,
+          interactive: false
+        }).addTo(map);
+      }
+    }
+
+    function removeBrushCursor() {
+      if (brushMarker) {
+        map.removeLayer(brushMarker);
+        brushMarker = null;
+      }
+    }
+
+    fillColorPicker.addEventListener('input', (e) => {
+      document.getElementById('hexVal').textContent = e.target.value.toUpperCase();
+      if (brushMarker) {
+        brushMarker.setStyle({ color: e.target.value, fillColor: e.target.value });
+      }
+    });
+
+    function getIntersectingFeatures(selectionGeoJson) {
+      const matches = [];
+      const checkLayer = (layer) => {
+        if (!layer.feature || !layer.feature.geometry) return;
+        try {
+          const featBbox = turf.bbox(layer.feature);
+          const selBbox = turf.bbox(selectionGeoJson);
+
+          if (featBbox[0] > selBbox[2] || featBbox[2] < selBbox[0] ||
+              featBbox[1] > selBbox[3] || featBbox[3] < selBbox[1]) {
+            return;
+          }
+
+          let intersects = false;
+          try {
+            intersects = turf.booleanIntersects(layer.feature, selectionGeoJson);
+          } catch (err) {
+            const center = getDynamicFeatureCentroidLatLng(layer.feature, layer);
+            if (center) {
+              intersects = turf.booleanPointInPolygon(turf.point([center.lng, center.lat]), selectionGeoJson);
+            }
+          }
+
+          if (intersects) {
+            matches.push({ feature: layer.feature, layer: layer });
+          }
+        } catch (e) {}
+      };
+
+      if (geojsonLayer) geojsonLayer.eachLayer(checkLayer);
+      subLayersGroup.eachLayer(group => {
+        if (group.eachLayer) group.eachLayer(checkLayer);
+      });
+
+      return matches;
+    }
+
+    function paintUnderBrush(latlng) {
+      if (!latlng) return;
+      const radiusMeters = getBrushRadiusMeters(latlng);
+      const radiusKm = Math.max(0.1, radiusMeters / 1000);
+      let brushPoly;
+      try {
+        brushPoly = turf.circle([latlng.lng, latlng.lat], radiusKm, { units: 'kilometers', steps: 16 });
+      } catch (err) {
+        return;
+      }
+
+      const checkAndPaint = (layer) => {
+        if (!layer.feature || !layer.feature.geometry) return;
+        const id = getFeatureId(layer.feature);
+        if (brushedInCurrentStroke.has(id)) return;
+
+        try {
+          const featBbox = turf.bbox(layer.feature);
+          const brushBbox = turf.bbox(brushPoly);
+
+          if (featBbox[0] > brushBbox[2] || featBbox[2] < brushBbox[0] ||
+              featBbox[1] > brushBbox[3] || featBbox[3] < brushBbox[1]) {
+            return;
+          }
+
+          let intersects = false;
+          try {
+            intersects = turf.booleanIntersects(layer.feature, brushPoly);
+          } catch (err) {
+            const center = getDynamicFeatureCentroidLatLng(layer.feature, layer);
+            if (center) {
+              intersects = turf.booleanPointInPolygon(turf.point([center.lng, center.lat]), brushPoly);
+            }
+          }
+
+          if (intersects) {
+            brushedInCurrentStroke.add(id);
+            applyColorToFeature(layer.feature, layer);
+          }
+        } catch (e) {}
+      };
+
+      if (geojsonLayer) geojsonLayer.eachLayer(checkAndPaint);
+      subLayersGroup.eachLayer(group => {
+        if (group.eachLayer) group.eachLayer(checkAndPaint);
+      });
+    }
+
+    // Map Event Listeners for Paint Tools
+    map.on('mousedown', (e) => {
+      if (e.originalEvent.button !== 0) return; // Left click only
+
+      if (activePaintTool === 'box') {
+        isBoxDrawing = true;
+        boxStartLatLng = e.latlng;
+        if (boxRectLayer) map.removeLayer(boxRectLayer);
+        boxRectLayer = L.rectangle([e.latlng, e.latlng], {
+          color: fillColorPicker.value,
+          weight: 2,
+          dashArray: '4, 4',
+          fillOpacity: 0.2
+        }).addTo(map);
+      } else if (activePaintTool === 'lasso') {
+        isLassoDrawing = true;
+        lassoPoints = [[e.latlng.lng, e.latlng.lat]];
+        if (lassoPolyLayer) map.removeLayer(lassoPolyLayer);
+        lassoPolyLayer = L.polyline([e.latlng], {
+          color: fillColorPicker.value,
+          weight: 2,
+          dashArray: '4, 4'
+        }).addTo(map);
+      } else if (activePaintTool === 'brush') {
+        isBrushing = true;
+        brushedInCurrentStroke.clear();
+        paintUnderBrush(e.latlng);
+      }
+    });
+
+    map.on('mousemove', (e) => {
+      if (activePaintTool === 'brush' && brushMarker) {
+        brushMarker.setLatLng(e.latlng);
+        brushMarker.setRadius(getBrushRadiusMeters(e.latlng));
+        if (isBrushing) {
+          paintUnderBrush(e.latlng);
+        }
+      } else if (activePaintTool === 'box' && isBoxDrawing && boxRectLayer) {
+        boxRectLayer.setBounds(L.latLngBounds(boxStartLatLng, e.latlng));
+      } else if (activePaintTool === 'lasso' && isLassoDrawing && lassoPolyLayer) {
+        const lastPt = lassoPoints[lassoPoints.length - 1];
+        if (!lastPt || Math.hypot(e.latlng.lng - lastPt[0], e.latlng.lat - lastPt[1]) > 0.00005) {
+          lassoPoints.push([e.latlng.lng, e.latlng.lat]);
+          const latLngs = lassoPoints.map(pt => [pt[1], pt[0]]);
+          lassoPolyLayer.setLatLngs(latLngs);
+        }
+      }
+    });
+
+    map.on('mouseup', () => {
+      if (activePaintTool === 'box' && isBoxDrawing) {
+        isBoxDrawing = false;
+        if (boxRectLayer) {
+          const bounds = boxRectLayer.getBounds();
+          map.removeLayer(boxRectLayer);
+          boxRectLayer = null;
+
+          const w = bounds.getWest(), eLng = bounds.getEast(), s = bounds.getSouth(), n = bounds.getNorth();
+          if (w !== eLng && s !== n) {
+            try {
+              const boxPoly = turf.bboxPolygon([Math.min(w, eLng), Math.min(s, n), Math.max(w, eLng), Math.max(s, n)]);
+              const matches = getIntersectingFeatures(boxPoly);
+              matches.forEach(m => applyColorToFeature(m.feature, m.layer));
+            } catch (err) { console.warn('Box selection error:', err); }
+          }
+        }
+      } else if (activePaintTool === 'lasso' && isLassoDrawing) {
+        isLassoDrawing = false;
+        if (lassoPolyLayer) {
+          map.removeLayer(lassoPolyLayer);
+          lassoPolyLayer = null;
+
+          if (lassoPoints.length >= 3) {
+            try {
+              const closedPoints = [...lassoPoints, lassoPoints[0]];
+              const lassoPoly = turf.polygon([closedPoints]);
+              const matches = getIntersectingFeatures(lassoPoly);
+              matches.forEach(m => applyColorToFeature(m.feature, m.layer));
+            } catch (err) { console.warn('Lasso selection error:', err); }
+          }
+        }
+      } else if (activePaintTool === 'brush') {
+        isBrushing = false;
+        brushedInCurrentStroke.clear();
+      }
+    });
+
     const languageModeSelect = document.getElementById('languageModeSelect');
     const customLangWrapper = document.getElementById('customLangWrapper');
     const customLangInput = document.getElementById('customLangInput');
@@ -548,6 +836,7 @@
     });
 
     function toggleAdjustLabelsMode(enable) {
+      if (enable) setPaintTool('pointer');
       isAdjustingLabels = enable;
       if (isAdjustingLabels) {
         if (!showLabelsToggle.checked) showLabelsToggle.checked = true;
@@ -898,10 +1187,23 @@
       layer.bindTooltip(countryName, { sticky: true });
 
       layer.on({
-        mouseover: (e) => e.target.setStyle({ weight: (2 * currentMapScale) / Math.pow(currentMapScale, 0.4), color: '#000000' }),
-        mouseout: (e) => e.target.setStyle(getBoundaryStyle(feature)),
-        click: () => applyColorToFeature(feature, layer),
+        mouseover: (e) => {
+          if (activePaintTool === 'pointer') {
+            e.target.setStyle({ weight: (2 * currentMapScale) / Math.pow(currentMapScale, 0.4), color: '#000000' });
+          }
+        },
+        mouseout: (e) => {
+          if (activePaintTool === 'pointer') {
+            e.target.setStyle(getBoundaryStyle(feature));
+          }
+        },
+        click: () => {
+          if (activePaintTool === 'pointer') {
+            applyColorToFeature(feature, layer);
+          }
+        },
         contextmenu: (e) => {
+          if (activePaintTool !== 'pointer') return;
           L.DomEvent.stopPropagation(e);
           const id = getFeatureId(feature);
           const name = getNameForFeature(feature);
@@ -1075,6 +1377,7 @@
     }
 
     map.on('contextmenu', (e) => {
+      if (activePaintTool !== 'pointer') return;
       let popupContent = document.createElement('div');
       const title = document.createElement('div');
       title.className = 'context-menu-title';
@@ -1914,6 +2217,7 @@
     map.on('move moveend zoomend resize', updateCropBoxDOMPosition);
 
     document.getElementById('toggleCropBtn').addEventListener('click', () => {
+      setPaintTool('pointer');
       if (isAdjustingLabels) toggleAdjustLabelsMode(false);
       savedLegendStyle = { left: mapLegend.style.left, top: mapLegend.style.top, bottom: mapLegend.style.bottom, right: mapLegend.style.right };
       isCroppingActive = true;
