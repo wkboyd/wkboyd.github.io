@@ -75,7 +75,7 @@
     /* Legend Builder in Sidebar */
     .legend-box { background: white; padding: 10px; border-radius: 4px; border: 1px solid #ddd; }
     .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-    .legend-color { width: 18px; height: 18px; border-radius: 3px; border: 1px solid #000; flex-shrink: 0; }
+    .legend-color { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #000; flex-shrink: 0; }
     .legend-input { flex: 1; padding: 4px; font-size: 0.85rem; border: 1px solid #ccc; border-radius: 3px; }
     .legend-del-btn { background: #dc3545; color: white; border: none; width: 22px; height: 22px; border-radius: 3px; font-size: 12px; cursor: pointer; line-height: 22px; text-align: center; padding: 0; }
     .legend-del-btn:hover { background: #a71d2a; }
@@ -86,20 +86,43 @@
       bottom: 20px; 
       left: 20px; 
       background: rgba(255, 255, 255, 0.94); 
-      padding: 10px 14px; 
+      padding: 8px 12px; 
       border-radius: 6px; 
       border: 1px solid #999; 
       z-index: 900; 
-      font-size: 0.85rem; 
+      font-size: 0.72rem; 
       display: flex; 
       flex-direction: column; 
-      gap: 6px; 
+      gap: 5px; 
       box-shadow: 0 2px 6px rgba(0,0,0,0.25); 
       user-select: none;
-      min-width: 120px;
+      min-width: 110px;
       height: auto;
       max-height: none;
       overflow: visible;
+    }
+
+    #legend-title {
+      font-weight: bold;
+      font-size: 0.82rem;
+      user-select: text;
+      -webkit-user-select: text;
+      white-space: pre-wrap;
+      outline: none;
+      cursor: text;
+      border: 1px transparent dashed;
+      border-radius: 3px;
+      padding: 1px 2px;
+      min-height: 1.2em;
+    }
+    #legend-title:hover {
+      background: rgba(0, 0, 0, 0.05);
+      border-color: #ccc;
+    }
+    #legend-title:focus {
+      background: #ffffff;
+      border-color: #007bff;
+      box-shadow: 0 0 3px rgba(0, 123, 255, 0.5);
     }
 
     /* Set pane z-index so labels sit above crop overlay, but popups sit above BOTH */
@@ -351,7 +374,7 @@
       
       <!-- Floating On-Map Legend -->
       <div id="map-legend">
-        <strong>Legend</strong>
+        <div id="legend-title" contenteditable="true" spellcheck="false">Click to add title</div>
         <div id="legend-display"><em>No colors assigned</em></div>
         <div id="legend-numbered-display" style="display: none; border-top: 1px solid #ccc; margin-top: 6px; padding-top: 6px;"></div>
       </div>
@@ -432,6 +455,20 @@
       refreshMapLabels();
       updateLegendUI();
     });
+
+    // Setup interactive editable Legend Title
+    const legendTitleEl = document.getElementById('legend-title');
+    if (legendTitleEl) {
+      L.DomEvent.disableClickPropagation(legendTitleEl);
+      L.DomEvent.disableScrollPropagation(legendTitleEl);
+
+      legendTitleEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          legendTitleEl.blur();
+        }
+      });
+    }
 
     function normalizeLng(lng) {
       return ((((lng + 180) % 360) + 360) % 360) - 180;
@@ -1047,12 +1084,12 @@
 
       if (activeNumberedLabels.length > 0) {
         numberedContainer.style.display = 'block';
-        const legendTitleFontSize = 0.8 * userTextScaleMultiplier;
+        const legendTitleFontSize = 0.72 * userTextScaleMultiplier;
         numberedContainer.innerHTML = `<strong style="font-size:${legendTitleFontSize}rem; color:#444;">Numbered Regions</strong>`;
         
         activeNumberedLabels.forEach(item => {
           const row = document.createElement('div');
-          row.style.fontSize = (0.75 * userTextScaleMultiplier) + 'rem';
+          row.style.fontSize = (0.68 * userTextScaleMultiplier) + 'rem';
           row.style.color = '#333';
           row.style.marginTop = '2px';
           row.innerHTML = `<strong>${item.numberIndex}.</strong> ${item.name}`;
@@ -1203,7 +1240,6 @@
           }
         },
         contextmenu: (e) => {
-          if (activePaintTool !== 'pointer') return;
           L.DomEvent.stopPropagation(e);
           const id = getFeatureId(feature);
           const name = getNameForFeature(feature);
@@ -1377,7 +1413,6 @@
     }
 
     map.on('contextmenu', (e) => {
-      if (activePaintTool !== 'pointer') return;
       let popupContent = document.createElement('div');
       const title = document.createElement('div');
       title.className = 'context-menu-title';
@@ -1625,7 +1660,7 @@
       const mapLegendBox = document.getElementById('map-legend');
       const usedColors = [...new Set(Object.values(countryColors))];
       
-      mapLegendBox.style.fontSize = (0.85 * userTextScaleMultiplier) + 'rem';
+      mapLegendBox.style.fontSize = (0.72 * userTextScaleMultiplier) + 'rem';
 
       if (usedColors.length === 0) {
         editor.innerHTML = '<em style="font-size: 0.8rem; color: #666;">Click countries or subdivisions to assign colors and generate legend items.</em>';
@@ -1636,7 +1671,7 @@
       editor.innerHTML = '';
       display.innerHTML = '';
 
-      const swatchDimension = Math.round(18 * userTextScaleMultiplier);
+      const swatchDimension = Math.round(14 * userTextScaleMultiplier);
 
       usedColors.forEach(color => {
         const currentLabel = legendLabels[color] || 'Unlabeled';
