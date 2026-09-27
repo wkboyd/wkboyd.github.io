@@ -11,8 +11,13 @@
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
   <!-- html2canvas for frontend high-res rendering -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-  <!-- Load GeoJSON directly as a script variable -->
-  <script src="OgfCountries.js"></script>
+
+  <!-- Preset JS script includes (eliminates XHR/CORS restrictions entirely) -->
+  <script src="Preset_OGF.js"></script>
+  <script src="Preset_FSA.js"></script>
+  <script src="Preset_Deodeca.js"></script>
+  <script src="Preset_Suria.js"></script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; }
     body { display: flex; height: 100vh; overflow: hidden; }
@@ -161,6 +166,15 @@
   <div id="sidebar">
     <h2>ChartOGF</h2>
 
+    <!-- Territory Preset Dropdown: reads preset variables loaded directly via script tags -->
+    <div class="control-group">
+      <label for="presetSelect">Territory Preset</label>
+      <select id="presetSelect" autocomplete="off" disabled>
+        <option value="">Detecting presets…</option>
+      </select>
+      <span class="field-hint">Load preset basemaps.</span>
+    </div>
+
     <!-- Language Selector Dropdown -->
     <div class="control-group">
       <label for="languageModeSelect">Display Language Mode</label>
@@ -232,12 +246,12 @@
 
     <!-- Actions -->
     <div class="control-group">
-      <!-- Pink Button: Reset Map / Restore Initial Basemap Boundaries -->
-      <button id="resetBtn" style="background: #e83e8c; color: white;">Reset to Defaults / Clear Colors</button>
       <!-- Deep Red Button: Completely Clear All Boundaries/Territories from Map -->
       <button id="clearAllBtn" style="background: #8b0000; color: white;">Clear All Territories</button>
       <button id="toggleCropBtn" style="background: #28a745;">Crop & Export Map</button>
       <button id="exportCsvBtn" style="background: #17a2b8;">Export Data (CSV)</button>
+      <button id="importCsvBtn" style="background: #6610f2; color: white;">Import Data (CSV)</button>
+      <input type="file" id="importCsvFile" accept=".csv,text/csv" style="display:none">
     </div>
 
     <!-- Export Controls Panel -->
@@ -414,7 +428,50 @@
       };
     }
 
+    // Convert Web Mercator (EPSG:3857) projected meters to standard WGS84 (EPSG:4326) degrees
+    function convert3857To4326Coord(coord) {
+      var x = coord[0];
+      var y = coord[1];
+      if (Math.abs(x) > 180 || Math.abs(y) > 90) {
+        var rMajor = 6378137.0;
+        var lng = (x / rMajor) * (180 / Math.PI);
+        var lat = (2 * Math.atan(Math.exp(y / rMajor)) - Math.PI / 2) * (180 / Math.PI);
+        return coord.length > 2 ? [lng, lat, coord[2]] : [lng, lat];
+      }
+      return coord;
+    }
+
+    // Recursively normalize GeoJSON geometry coordinates to WGS84 degrees
+    function normalizeGeoJSONCoords(geojson) {
+      if (!geojson) return geojson;
+      var cloned = JSON.parse(JSON.stringify(geojson));
+
+      function processCoords(coords) {
+        if (!Array.isArray(coords) || coords.length === 0) return coords;
+        if (typeof coords[0] === 'number') {
+          return convert3857To4326Coord(coords);
+        }
+        return coords.map(processCoords);
+      }
+
+      if (cloned.type === 'FeatureCollection' && Array.isArray(cloned.features)) {
+        cloned.features.forEach(function(f) {
+          if (f.geometry && f.geometry.coordinates) {
+            f.geometry.coordinates = processCoords(f.geometry.coordinates);
+          }
+        });
+      } else if (cloned.type === 'Feature' && cloned.geometry && cloned.geometry.coordinates) {
+        cloned.geometry.coordinates = processCoords(cloned.geometry.coordinates);
+      } else if (cloned.geometry && cloned.geometry.coordinates) {
+        cloned.geometry.coordinates = processCoords(cloned.geometry.coordinates);
+      }
+
+      return cloned;
+    }
+
     let geojsonLayer;
+    let currentPresetData = null;   // Parsed GeoJSON FeatureCollection of the currently loaded preset
+    let currentPresetFile = null;   // e.g. "Preset_OGF"
     const subLayersGroup = L.layerGroup().addTo(map);
     const labelMarkersGroup = L.layerGroup().addTo(map);
     
@@ -460,6 +517,8 @@
       document.getElementById('lockRatioCheck').checked = false;
 
       refreshMapLabels();
+
+      initializePresets();
     });
 
     languageModeSelect.addEventListener('change', (e) => {
@@ -507,21 +566,74 @@
     const labelCustomDragPositions = {}; 
     const numberedLabelsToggle = {};
 
+    function getTags(feature) {
+      const props = (feature && feature.properties) || {};
+      return props.tags || props;
+    }
+
+    function getRelationId(feature) {
+      const props = (feature && feature.properties) || {};
+      const tags = getTags(feature);
+      const candidates = [
+        props.relation_id, props.osm_id, props.full_id, props.id, props['@id'],
+        tags.relation_id, tags.osm_id, tags.full_id, tags.id, tags['@id']
+      ];
+      for (const c of candidates) {
+        if (c === undefined || c === null || c === '') continue;
+        const match = String(c).match(/\d+/);
+        if (match) return match[0];
+      }
+      return null;
+    }
+
+    function getAdminLevel(feature) {
+      const tags = getTags(feature);
+      const candidateKeys = ['admin_level', 'admin_leve', 'adminlevel'];
+      for (const k of candidateKeys) {
+        if (tags[k] !== undefined && tags[k] !== null && tags[k] !== '') {
+          const n = parseInt(tags[k], 10);
+          if (!isNaN(n)) return n;
+        }
+      }
+      for (const k in tags) {
+        if (/^admin_lev/i.test(k) && tags[k] !== undefined && tags[k] !== null && tags[k] !== '') {
+          const n = parseInt(tags[k], 10);
+          if (!isNaN(n)) return n;
+        }
+      }
+      return null;
+    }
+
+    function getRawNameForTags(tags, mode) {
+      if (mode && mode !== 'native') {
+        const colonKey = `name:${mode}`;
+        const underscoreKey = `name_${mode}`;
+        if (tags[colonKey]) return tags[colonKey];
+        if (tags[underscoreKey]) return tags[underscoreKey];
+      }
+      return tags.name || tags['ogf:name'] || tags.int_name || tags.official_name || tags['name:en'] || tags.ref || '';
+    }
+
+    function getLanguageCodesForTags(tags, into) {
+      const result = into || new Set();
+      for (const key in tags) {
+        if (tags[key] === undefined || tags[key] === null || tags[key] === '') continue;
+        const m = key.match(/^name:(.+)$/) || key.match(/^name_([A-Za-z0-9]+)$/);
+        if (m) result.add(m[1]);
+      }
+      return result;
+    }
+
     function getNameForFeature(feature) {
       if (!feature || !feature.properties) return 'Unknown Boundary';
       const id = getFeatureId(feature);
-      
+
       if (labelOverrides[id] && labelOverrides[id].trim() !== '') return labelOverrides[id];
 
-      const properties = feature.properties;
-      const tags = properties.tags || properties;
-
-      if (currentLanguageMode === 'custom' && currentCustomTag) {
-        const langKey = `name:${currentCustomTag}`;
-        if (tags[langKey]) return tags[langKey];
-      }
-
-      return tags.name || tags['ogf:name'] || tags.int_name || tags.official_name || tags['name:en'] || tags.ref || properties.id || 'Unknown Boundary';
+      const tags = getTags(feature);
+      const mode = (currentLanguageMode === 'custom' && currentCustomTag) ? currentCustomTag : 'native';
+      const name = getRawNameForTags(tags, mode);
+      return name || feature.properties.id || 'Unknown Boundary';
     }
 
     function refreshMapTooltips() {
@@ -541,16 +653,10 @@
     const territoryCache = {}; 
 
     function getFeatureId(feature) {
-      const props = feature.properties || {};
-      const tags = props.tags || {};
-      return props.id || tags.relation_id || tags.name || tags['ogf:name'] || JSON.stringify(feature.geometry);
-    }
-
-    function getRelationId(feature) {
-      const props = feature.properties || {};
-      const idStr = String(props.id || props['@id'] || props.relation_id || '');
-      const match = idStr.match(/\d+/);
-      return match ? match[0] : null;
+      const relId = getRelationId(feature);
+      if (relId) return 'rel:' + relId;
+      const tags = getTags(feature);
+      return tags.name || tags['ogf:name'] || JSON.stringify(feature.geometry);
     }
 
     function getDynamicFeatureCentroidLatLng(feature, layer) {
@@ -878,7 +984,7 @@
           subLabel.style.fontSize = '0.75rem';
           subLabel.textContent = 'Subdivision Admin Level:';
 
-          const currentLevel = parseInt(feature.properties && (feature.properties.admin_level || (feature.properties.tags && feature.properties.tags.admin_level))) || 2;
+          const currentLevel = getAdminLevel(feature) || 2;
           let defaultSubLevel = currentLevel + 1;
           if (currentLevel === 2) defaultSubLevel = 4;
           else if (currentLevel === 4) defaultSubLevel = 6;
@@ -959,19 +1065,13 @@
     }
 
     function addSingleFeatureToMap(feature) {
-      const newLayer = L.geoJSON(feature, {
+      const normalized = normalizeGeoJSONCoords(feature);
+      const newLayer = L.geoJSON(normalized, {
         style: f => getBoundaryStyle(f),
         onEachFeature: (f, l) => setupFeatureEvents(f, l)
       });
       subLayersGroup.addLayer(newLayer);
       refreshMapLabels();
-    }
-
-    if (typeof ogfData !== 'undefined') {
-      geojsonLayer = L.geoJSON(ogfData, {
-        style: feature => getBoundaryStyle(feature),
-        onEachFeature: (feature, layer) => setupFeatureEvents(feature, layer)
-      }).addTo(map);
     }
 
     map.on('contextmenu', (e) => {
@@ -1012,11 +1112,9 @@
 
         for (let key in territoryCache) {
           const feat = territoryCache[key];
-          const featProps = feat.properties || {};
-          const featTags = featProps.tags || {};
-          const featLevel = featProps.admin_level || featTags.admin_level;
-          
-          if (String(featLevel) === String(targetLevel)) {
+          const featLevel = getAdminLevel(feat);
+
+          if (featLevel !== null && String(featLevel) === String(targetLevel)) {
             let isInside = false;
             try {
               isInside = turf.booleanPointInPolygon(clickPt, feat);
@@ -1090,23 +1188,46 @@
       const normCenterLng = normalizeLng(centerLng);
       const lngOffset = centerLng - normCenterLng;
 
-      if (relationId) {
-        overpassQuery = `[out:json][timeout:25];rel(${relationId});map_to_area->.parentArea;(relation["boundary"="administrative"]["admin_level"="${adminLevel}"](area.parentArea););out body;>;out skel qt;`;
-      } else {
-        const bbox = `${bounds.getSouth()},${Math.min(normWest, normEast)},${bounds.getNorth()},${Math.max(normWest, normEast)}`;
-        overpassQuery = `[out:json][timeout:25];(relation["boundary"="administrative"]["admin_level"="${adminLevel}"](${bbox}););out body;>;out skel qt;`;
+      let geojson = null;
+
+      // Extract Level 4 Subdivisions locally if standard relations match known loaded presets
+      if (String(adminLevel) === "4" && ["39192", "999", "471"].includes(String(relationId))) {
+        let presetData = null;
+        if (String(relationId) === "39192") presetData = window.PRESET_FSA_DATA;
+        if (String(relationId) === "999") presetData = window.PRESET_DEODECA_DATA;
+        if (String(relationId) === "471") presetData = window.PRESET_SURIA_DATA;
+
+        if (presetData && presetData.features) {
+          const subFeatures = presetData.features.filter(f => String(getAdminLevel(f)) === "4" && f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
+          if (subFeatures.length > 0) {
+            geojson = { type: "FeatureCollection", features: JSON.parse(JSON.stringify(subFeatures)) };
+          }
+        }
       }
 
-      const response = await fetch('https://overpass.opengeofiction.net/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(overpassQuery) });
-      if (!response.ok) throw new Error("Overpass server error");
+      // Fallback to traditional overpass fetch if preset extraction failed or wasn't applicable
+      if (!geojson) {
+        if (relationId) {
+          overpassQuery = `[out:json][timeout:25];rel(${relationId});map_to_area->.parentArea;(relation["boundary"="administrative"]["admin_level"="${adminLevel}"](area.parentArea););out body;>;out skel qt;`;
+        } else {
+          const bbox = `${bounds.getSouth()},${Math.min(normWest, normEast)},${bounds.getNorth()},${Math.max(normWest, normEast)}`;
+          overpassQuery = `[out:json][timeout:25];(relation["boundary"="administrative"]["admin_level"="${adminLevel}"](${bbox}););out body;>;out skel qt;`;
+        }
 
-      const osmJson = await response.json();
-      if (!osmJson.elements || osmJson.elements.length === 0) throw new Error(`No level ${adminLevel} subdivisions found for this boundary.`);
-      const rawGeojson = osmtogeojson(osmJson);
-      let geojson = { ...rawGeojson, features: rawGeojson.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')) };
-      if (!geojson.features || geojson.features.length === 0) throw new Error("Could not construct polygon boundaries from result.");
+        const response = await fetch('https://overpass.opengeofiction.net/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(overpassQuery) });
+        if (!response.ok) throw new Error("Overpass server error");
+
+        const osmJson = await response.json();
+        if (!osmJson.elements || osmJson.elements.length === 0) throw new Error(`No level ${adminLevel} subdivisions found for this boundary.`);
+        const rawGeojson = osmtogeojson(osmJson);
+        geojson = { ...rawGeojson, features: rawGeojson.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')) };
+        if (!geojson.features || geojson.features.length === 0) throw new Error("Could not construct polygon boundaries from result.");
+      }
 
       geojson = shiftGeoJsonLongitude(geojson, lngOffset);
+      geojson = normalizeGeoJSONCoords(geojson);
+      
+      // Automatically hide/cache the clicked level 2 geometry
       removeTerritory(parentFeature, parentLayer);
 
       if (parentColor) {
@@ -1162,6 +1283,7 @@
       }
 
       geojson = shiftGeoJsonLongitude(geojson, lngOffset);
+      geojson = normalizeGeoJSONCoords(geojson);
 
       let newSubLayer = L.geoJSON(geojson, {
         style: feature => getBoundaryStyle(feature),
@@ -1265,7 +1387,40 @@
 
     document.getElementById('clearAllBtn').addEventListener('click', clearAllTerritoriesFromMap);
 
-    document.getElementById('resetBtn').addEventListener('click', () => {
+    // --- DIRECT JS PRESET LOADER ---
+    const PRESETS = [
+      { id: 'Preset_OGF', name: 'OGF', varName: 'PRESET_OGF_DATA' },
+      { id: 'Preset_FSA', name: 'FSA', varName: 'PRESET_FSA_DATA' },
+      { id: 'Preset_Deodeca', name: 'Deodeca', varName: 'PRESET_DEODECA_DATA' },
+      { id: 'Preset_Suria', name: 'Suria', varName: 'PRESET_SURIA_DATA' }
+    ];
+
+    const RELOAD_SENTINEL = '__reload_current__';
+
+    function initializePresets() {
+      const select = document.getElementById('presetSelect');
+      select.innerHTML = '';
+
+      PRESETS.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        select.appendChild(opt);
+      });
+
+      const reloadOpt = document.createElement('option');
+      reloadOpt.value = RELOAD_SENTINEL;
+      reloadOpt.textContent = '↻ Reload / Reset Current Preset';
+      select.appendChild(reloadOpt);
+
+      select.disabled = false;
+
+      const defaultPreset = PRESETS[0].id;
+      select.value = defaultPreset;
+      loadPreset(defaultPreset);
+    }
+
+    function hardResetMapState() {
       for (let key in countryColors) delete countryColors[key];
       for (let key in countryOpacities) delete countryOpacities[key];
       for (let key in legendLabels) delete legendLabels[key];
@@ -1277,24 +1432,63 @@
       subLayersGroup.clearLayers();
       labelMarkersGroup.clearLayers();
 
-      if (geojsonLayer) map.removeLayer(geojsonLayer);
-      if (typeof ogfData !== 'undefined') {
-        geojsonLayer = L.geoJSON(ogfData, {
+      if (geojsonLayer) { map.removeLayer(geojsonLayer); geojsonLayer = null; }
+      if (isAdjustingLabels) toggleAdjustLabelsMode(false);
+      updateLegendUI();
+    }
+
+    function loadPreset(presetId) {
+      const select = document.getElementById('presetSelect');
+      select.disabled = true;
+
+      try {
+        const presetConfig = PRESETS.find(p => p.id === presetId);
+        if (!presetConfig) throw new Error('Unknown preset: ' + presetId);
+
+        const rawData = window[presetConfig.varName];
+        if (!rawData) {
+          throw new Error(`Data for ${presetConfig.name} (${presetConfig.varName}) is not defined. Ensure ${presetConfig.id}.js is included.`);
+        }
+
+        // Normalize Web Mercator EPSG:3857 coordinates to EPSG:4326 lat/lng degrees
+        const data = normalizeGeoJSONCoords(rawData);
+
+        hardResetMapState();
+
+        currentPresetFile = presetId;
+        currentPresetData = data;
+
+        geojsonLayer = L.geoJSON(data, {
           style: feature => getBoundaryStyle(feature),
           onEachFeature: (feature, layer) => setupFeatureEvents(feature, layer)
         }).addTo(map);
-      }
 
-      if (isAdjustingLabels) toggleAdjustLabelsMode(false);
-      updateLegendUI();
+        if (geojsonLayer.getBounds().isValid()) {
+          map.fitBounds(geojsonLayer.getBounds());
+        }
+
+        updateLegendUI();
+        refreshMapLabels();
+      } catch (err) {
+        alert(`Failed to load preset "${presetId}": ${err.message}`);
+      } finally {
+        select.disabled = false;
+        select.value = currentPresetFile || '';
+      }
+    }
+
+    document.getElementById('presetSelect').addEventListener('change', (e) => {
+      const chosen = e.target.value;
+      if (!chosen) return;
+      if (chosen === RELOAD_SENTINEL) {
+        if (currentPresetFile) loadPreset(currentPresetFile);
+        return;
+      }
+      loadPreset(chosen);
     });
 
     // --- CSV EXPORT ---
     document.getElementById('exportCsvBtn').addEventListener('click', () => {
-      // Build a lookup of id -> feature by walking every layer once. This is only
-      // used to resolve names/relation ids - the actual list of what to export
-      // comes straight from countryColors below, so every colored territory is
-      // guaranteed to produce exactly one row, no matter how the layers are nested.
       const featureById = {};
       const indexLayer = layer => {
         if (layer.eachLayer) {
@@ -1325,33 +1519,206 @@
         rows.push([relationId, name, legendValue, color]);
       });
 
-      // Build the raw CSV text (no data: URI here - see below for why).
       const csvContent = rows.map(row => row.map(escapeCsv).join(",")).join("\n");
 
-      // IMPORTANT: don't wrap this in a "data:text/csv,..." URI passed through
-      // encodeURI(). encodeURI() intentionally leaves '#' unescaped (it's a
-      // valid URI character reserved for fragments), and hex color codes are
-      // full of '#'. The moment the string hits the first '#', the browser
-      // treats everything after it as a URL fragment and silently drops it
-      // from the downloaded file - which looks exactly like "only one row,
-      // and even that row's color code is missing". A Blob + object URL has
-      // no such character restrictions.
-      // Prepend a UTF-8 BOM. Without it, Excel (and some other spreadsheet
-      // apps) can't reliably tell the file is UTF-8 and fall back to
-      // Windows-1252, which mangles any non-ASCII characters in names
-      // (e.g. "西城国" turning into "è¥¿åŸŽå›½"). The BOM fixes that.
       const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
       const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.setAttribute("href", blobUrl);
-
-      // Update download file naming convention
       link.setAttribute("download", "chartogf-export.csv"); 
       
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(blobUrl);
+    });
+
+    // --- CSV IMPORT ---
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let field = '';
+      let inQuotes = false;
+      const src = text.replace(/^\uFEFF/, '');
+
+      for (let i = 0; i < src.length; i++) {
+        const c = src[i];
+        if (inQuotes) {
+          if (c === '"') {
+            if (src[i + 1] === '"') { field += '"'; i++; }
+            else { inQuotes = false; }
+          } else {
+            field += c;
+          }
+        } else if (c === '"') {
+          inQuotes = true;
+        } else if (c === ',') {
+          row.push(field); field = '';
+        } else if (c === '\r') {
+          // ignore
+        } else if (c === '\n') {
+          row.push(field); rows.push(row); row = []; field = '';
+        } else {
+          field += c;
+        }
+      }
+      if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+
+      return rows.filter(r => r.some(cell => cell !== ''));
+    }
+
+    async function fetchTerritoryByRelationId(relationId) {
+      const overpassQuery = `[out:json][timeout:25];rel(${relationId});out body;>;out skel qt;`;
+      const response = await fetch('https://overpass.opengeofiction.net/api/interpreter', {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(overpassQuery)
+      });
+      if (!response.ok) throw new Error('Overpass server error');
+
+      const osmJson = await response.json();
+      if (!osmJson.elements || osmJson.elements.length === 0) throw new Error(`relation ${relationId} not found`);
+
+      const rawGeojson = osmtogeojson(osmJson);
+      const polyFeatures = rawGeojson.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
+      if (polyFeatures.length === 0) throw new Error(`relation ${relationId} has no polygon geometry`);
+
+      return polyFeatures.find(f => getRelationId(f) === String(relationId)) || polyFeatures[0];
+    }
+
+    async function importCsvData(rows) {
+      if (rows.length < 2) { alert('The CSV file has no data rows.'); return; }
+
+      const header = rows[0].map(h => h.trim().toLowerCase());
+      const colIndex = {
+        relationId: header.indexOf('relation id'),
+        name: header.indexOf('name'),
+        legendValue: header.indexOf('legend value'),
+        colorCode: header.indexOf('color code')
+      };
+      if (colIndex.relationId === -1) { alert('The CSV is missing a "Relation ID" column.'); return; }
+
+      const dataRows = rows.slice(1).map(r => ({
+        relationId: (r[colIndex.relationId] || '').trim(),
+        name: colIndex.name > -1 ? (r[colIndex.name] || '').trim() : '',
+        legendValue: colIndex.legendValue > -1 ? (r[colIndex.legendValue] || '').trim() : '',
+        colorCode: colIndex.colorCode > -1 ? (r[colIndex.colorCode] || '').trim() : ''
+      })).filter(r => r.relationId);
+
+      if (dataRows.length === 0) { alert('No rows with a Relation ID were found in the CSV.'); return; }
+
+      clearAllTerritoriesFromMap();
+
+      const baseFeaturesByRelId = {};
+      if (currentPresetData && Array.isArray(currentPresetData.features)) {
+        currentPresetData.features.forEach(f => {
+          const rid = getRelationId(f);
+          if (rid) baseFeaturesByRelId[rid] = f;
+        });
+      }
+
+      const resolved = [];
+      const failures = [];
+
+      for (const row of dataRows) {
+        const cacheKey = 'rel:' + row.relationId;
+        let feature = territoryCache[cacheKey] || baseFeaturesByRelId[row.relationId] || null;
+
+        if (feature) {
+          delete territoryCache[cacheKey];
+        } else {
+          try {
+            feature = await fetchTerritoryByRelationId(row.relationId);
+          } catch (err) {
+            failures.push(`Relation ${row.relationId}: ${err.message}`);
+            continue;
+          }
+        }
+        resolved.push({ row, feature });
+      }
+
+      const langCodes = new Set();
+      resolved.forEach(({ feature }) => getLanguageCodesForTags(getTags(feature), langCodes));
+
+      const modeScores = { native: 0 };
+      langCodes.forEach(code => { modeScores[code] = 0; });
+
+      resolved.forEach(({ row, feature }) => {
+        if (!row.name) return;
+        const tags = getTags(feature);
+        for (const mode in modeScores) {
+          if (getRawNameForTags(tags, mode).trim() === row.name) modeScores[mode]++;
+        }
+      });
+
+      let bestMode = 'native';
+      let bestScore = modeScores.native;
+      langCodes.forEach(code => {
+        if (modeScores[code] > bestScore) { bestScore = modeScores[code]; bestMode = code; }
+      });
+
+      if (bestMode === 'native') {
+        currentLanguageMode = 'default';
+        languageModeSelect.value = 'default';
+        customLangWrapper.style.display = 'none';
+      } else {
+        currentLanguageMode = 'custom';
+        currentCustomTag = bestMode;
+        languageModeSelect.value = 'custom';
+        customLangInput.value = bestMode;
+        customLangWrapper.style.display = 'flex';
+      }
+
+      resolved.forEach(({ row, feature }) => {
+        const id = getFeatureId(feature);
+
+        if (row.colorCode) {
+          countryColors[id] = row.colorCode;
+          countryOpacities[id] = parseFloat(fillOpacityPicker.value);
+          if (row.legendValue) legendLabels[row.colorCode] = row.legendValue;
+          else if (!legendLabels[row.colorCode]) legendLabels[row.colorCode] = 'Group ' + (Object.keys(legendLabels).length + 1);
+        }
+
+        if (row.name) {
+          const tags = getTags(feature);
+          const displayed = getRawNameForTags(tags, bestMode).trim();
+          if (displayed !== row.name) labelOverrides[id] = row.name; else delete labelOverrides[id];
+        }
+
+        addSingleFeatureToMap(feature);
+      });
+
+      updateLegendUI();
+      refreshMapTooltips();
+      refreshMapLabels();
+
+      if (failures.length > 0) {
+        alert(`Import finished with ${failures.length} issue(s):\n` + failures.join('\n'));
+      }
+    }
+
+    const importCsvBtn = document.getElementById('importCsvBtn');
+    const importCsvFile = document.getElementById('importCsvFile');
+
+    importCsvBtn.addEventListener('click', () => importCsvFile.click());
+
+    importCsvFile.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const originalLabel = importCsvBtn.textContent;
+      importCsvBtn.disabled = true;
+      importCsvBtn.textContent = 'Importing…';
+
+      try {
+        const text = await file.text();
+        await importCsvData(parseCsv(text));
+      } catch (err) {
+        alert('Import failed: ' + err.message);
+      } finally {
+        importCsvBtn.textContent = originalLabel;
+        importCsvBtn.disabled = false;
+        importCsvFile.value = '';
+      }
     });
 
     // CROP BOX & EXPORT ENGINE WITH DOM SCALING
