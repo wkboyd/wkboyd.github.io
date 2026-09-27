@@ -7,7 +7,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Converter for Overpass API OSM JSON output to GeoJSON -->
   <script src="https://cdn.jsdelivr.net/npm/osmtogeojson@3.0.0-beta.5/osmtogeojson.js"></script>
-  <!-- Turf.js for advanced spatial queries, point-in-polygon, and exact centroids -->
+  <!-- Turf.js for advanced spatial queries, point-in-polygon, exact centroids, and fallback buffering -->
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
   <!-- html2canvas for frontend high-res rendering -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -51,7 +51,7 @@
     .legend-del-btn { background: #dc3545; color: white; border: none; width: 22px; height: 22px; border-radius: 3px; font-size: 12px; cursor: pointer; line-height: 22px; text-align: center; padding: 0; }
     .legend-del-btn:hover { background: #a71d2a; }
 
-    /* Floating On-Map Legend (Fully expanding, no scrollbars for clear exports) */
+    /* Floating On-Map Legend */
     #map-legend { 
       position: absolute; 
       bottom: 20px; 
@@ -202,7 +202,7 @@
       <input type="range" id="fillOpacity" min="0.05" max="1" step="0.05" value="0.5" autocomplete="off">
     </div>
 
-    <!-- Dynamic Text & Label Size Scale Factor (Range up to 500%) -->
+    <!-- Dynamic Text & Label Size Scale Factor -->
     <div class="control-group">
       <label for="textScaleSlider">
         <span>Text & Legend Scale</span>
@@ -232,7 +232,10 @@
 
     <!-- Actions -->
     <div class="control-group">
-      <button id="resetBtn" style="background: #dc3545;">Reset Map / Restore All</button>
+      <!-- Pink Button: Reset Map / Restore Initial Basemap Boundaries -->
+      <button id="resetBtn" style="background: #e83e8c; color: white;">Reset to Defaults / Clear Colors</button>
+      <!-- Deep Red Button: Completely Clear All Boundaries/Territories from Map -->
+      <button id="clearAllBtn" style="background: #8b0000; color: white;">Clear All Territories</button>
       <button id="toggleCropBtn" style="background: #28a745;">Crop & Export Map</button>
       <button id="exportCsvBtn" style="background: #17a2b8;">Export Data (CSV)</button>
     </div>
@@ -329,14 +332,14 @@
     });
 
     let currentMapScale = 1;
-    let userTextScaleMultiplier = 1.0; // Dynamic scale factor multiplier for text
+    let userTextScaleMultiplier = 1.0; 
     let baseZoomLevel = null;
     let baseMapCenter = null;
 
     const map = L.map('map', { 
       attributionControl: false,
       renderer: canvasRenderer,
-      zoomSnap: 0 // Required for fractional zooming when scaling
+      zoomSnap: 0 
     }).setView([0, 80], 3);
 
     const ogfBasemap = L.tileLayer('https://tile.opengeofiction.net/ogf-carto/{z}/{x}/{y}.png', {
@@ -426,9 +429,7 @@
     const showLabelsToggle = document.getElementById('showLabelsToggle');
     const adjustLabelsBtn = document.getElementById('adjustLabelsBtn');
 
-    // Force default un-cached settings on page load
     window.addEventListener('DOMContentLoaded', () => {
-      // Clear form element browser caching on reload
       languageModeSelect.value = 'default';
       currentLanguageMode = 'default';
       customLangWrapper.style.display = 'none';
@@ -627,7 +628,6 @@
 
       const layout = calculateLabelLayout();
       
-      // Calculate font size dynamically and apply userTextScaleMultiplier
       const baseFontSize = (11 / Math.pow(currentMapScale, 0.45));
       const scaledFontSize = baseFontSize * userTextScaleMultiplier;
       const stroke = 1;
@@ -724,7 +724,10 @@
 
     map.on('zoomend moveend', () => { if (showLabelsToggle.checked) refreshMapLabels(); });
 
-    function cacheTerritory(feature) { territoryCache[getFeatureId(feature)] = feature; }
+    function cacheTerritory(feature) { 
+      const id = getFeatureId(feature);
+      territoryCache[id] = feature; 
+    }
 
     function removeTerritory(feature, layer) {
       const id = getFeatureId(feature);
@@ -742,6 +745,30 @@
 
       map.closePopup();
       refreshMapLabels();
+    }
+
+    function clearAllTerritoriesFromMap() {
+      for (let key in countryColors) delete countryColors[key];
+      for (let key in countryOpacities) delete countryOpacities[key];
+      for (let key in legendLabels) delete legendLabels[key];
+      for (let key in labelOverrides) delete labelOverrides[key];
+      for (let key in labelCustomDragPositions) delete labelCustomDragPositions[key];
+      for (let key in numberedLabelsToggle) delete numberedLabelsToggle[key];
+      for (let key in territoryCache) delete territoryCache[key];
+
+      if (geojsonLayer) {
+        geojsonLayer.eachLayer(l => { if (l.feature) cacheTerritory(l.feature); });
+        map.removeLayer(geojsonLayer);
+        geojsonLayer = null;
+      }
+      subLayersGroup.eachLayer(group => {
+        group.eachLayer(l => { if (l.feature) cacheTerritory(l.feature); });
+      });
+      subLayersGroup.clearLayers();
+      labelMarkersGroup.clearLayers();
+
+      if (isAdjustingLabels) toggleAdjustLabelsMode(false);
+      updateLegendUI();
     }
 
     function getBoundaryStyle(feature, exportMultiplier = currentMapScale) {
@@ -815,7 +842,6 @@
           saveOverrideBtn.textContent = 'Save Label Override';
           saveOverrideBtn.onclick = applyOverride;
 
-          // Toggle Numbering manually
           const numberToggleBtn = document.createElement('button');
           numberToggleBtn.className = 'context-menu-btn';
           numberToggleBtn.style.marginTop = '4px';
@@ -977,48 +1003,56 @@
       addBtn.style.color = '#fff';
       addBtn.style.fontWeight = 'bold';
       addBtn.textContent = '➕ Add Territory Here';
-      addBtn.onclick = async () => {
+      
+      addBtn.onclick = () => {
         const targetLevel = adminSelect.value;
         let cachedMatch = null;
-        const pt = turf.point([e.latlng.lng, e.latlng.lat]);
         
+        const clickPt = turf.point([e.latlng.lng, e.latlng.lat]);
+
         for (let key in territoryCache) {
           const feat = territoryCache[key];
-          const featLevel = feat.properties && String(feat.properties.admin_level);
+          const featProps = feat.properties || {};
+          const featTags = featProps.tags || {};
+          const featLevel = featProps.admin_level || featTags.admin_level;
           
-          if (featLevel === String(targetLevel) || (targetLevel === '2' && !featLevel)) {
-            try { if (turf.booleanPointInPolygon(pt, feat)) { cachedMatch = feat; delete territoryCache[key]; break; } } 
-            catch (err) {
+          if (String(featLevel) === String(targetLevel)) {
+            let isInside = false;
+            try {
+              isInside = turf.booleanPointInPolygon(clickPt, feat);
+            } catch (err) {
               const tempLayer = L.geoJSON(feat);
-              let inside = false;
-              tempLayer.eachLayer(l => { if (l.getBounds && l.getBounds().contains(e.latlng)) inside = true; });
-              if (inside) { cachedMatch = feat; delete territoryCache[key]; break; }
+              tempLayer.eachLayer(l => {
+                if (l.getBounds().contains(e.latlng)) {
+                  isInside = true;
+                }
+              });
+            }
+
+            if (isInside) {
+              cachedMatch = feat;
+              break;
             }
           }
         }
 
-        if (!cachedMatch && targetLevel === '2' && typeof ogfData !== 'undefined' && ogfData.features) {
-          for (const feat of ogfData.features) {
-            try { if (turf.booleanPointInPolygon(pt, feat)) { cachedMatch = feat; break; } } 
-            catch (err) {
-              const tempLayer = L.geoJSON(feat);
-              let inside = false;
-              tempLayer.eachLayer(l => { if (l.getBounds && l.getBounds().contains(e.latlng)) inside = true; });
-              if (inside) { cachedMatch = feat; delete territoryCache[key]; break; }
-            }
-          }
+        if (cachedMatch) {
+          addSingleFeatureToMap(cachedMatch);
+          delete territoryCache[getFeatureId(cachedMatch)];
+          map.closePopup();
+          return;
         }
-
-        if (cachedMatch) { addSingleFeatureToMap(cachedMatch); map.closePopup(); return; }
 
         addBtn.textContent = 'Fetching territory...';
         addBtn.disabled = true;
 
-        try {
-          const fetchedFeature = await fetchTerritoryAtPoint(e.latlng, targetLevel);
-          if (fetchedFeature) { addSingleFeatureToMap(fetchedFeature); map.closePopup(); } 
-          else { alert(`No level ${targetLevel} territory found at this location.`); addBtn.textContent = '➕ Add Territory Here'; addBtn.disabled = false; }
-        } catch (err) { alert("Failed to add territory: " + err.message); addBtn.textContent = '➕ Add Territory Here'; addBtn.disabled = false; }
+        fetchTerritoryAtPoint(e.latlng, targetLevel)
+          .then(() => map.closePopup())
+          .catch(err => {
+            alert("Failed to add territory: " + err.message);
+            addBtn.textContent = '➕ Add Territory Here';
+            addBtn.disabled = false;
+          });
       };
 
       addGroup.appendChild(addLabel);
@@ -1044,6 +1078,10 @@
     }
 
     async function fetchSubdivisions(relationId, parentFeature, adminLevel, parentLayer) {
+      const parentId = getFeatureId(parentFeature);
+      const parentColor = countryColors[parentId];
+      const parentOpacity = countryOpacities[parentId];
+
       let overpassQuery = '';
       const bounds = parentLayer.getBounds();
       const normWest = normalizeLng(bounds.getWest());
@@ -1071,8 +1109,18 @@
       geojson = shiftGeoJsonLongitude(geojson, lngOffset);
       removeTerritory(parentFeature, parentLayer);
 
+      if (parentColor) {
+        geojson.features.forEach(subFeature => {
+          const subId = getFeatureId(subFeature);
+          countryColors[subId] = parentColor;
+          countryOpacities[subId] = parentOpacity !== undefined ? parentOpacity : parseFloat(fillOpacityPicker.value);
+        });
+      }
+
       let newSubLayer = L.geoJSON(geojson, { style: feature => getBoundaryStyle(feature), onEachFeature: (feature, layer) => setupFeatureEvents(feature, layer) });
       subLayersGroup.addLayer(newSubLayer);
+      
+      updateLegendUI();
       refreshMapLabels();
     }
 
@@ -1080,34 +1128,48 @@
       const normLat = latlng.lat;
       const normLng = normalizeLng(latlng.lng);
       const lngOffset = latlng.lng - normLng;
-      let rawGeojson = null;
 
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const timeout = attempt === 1 ? 25 : 45;
-        const overpassQuery = `[out:json][timeout:${timeout}];(is_in(${normLat},${normLng})->.a;relation.a["boundary"="administrative"]["admin_level"="${adminLevel}"];);out body;>;out skel qt;`;
-        try {
-          const response = await fetch('https://overpass.opengeofiction.net/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(overpassQuery) });
-          if (!response.ok) continue;
-          const osmJson = await response.json();
-          if (osmJson.elements && osmJson.elements.length > 0) {
-            const converted = osmtogeojson(osmJson);
-            const validFeatures = converted.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'));
-            if (validFeatures.length > 0) { rawGeojson = { ...converted, features: validFeatures }; break; }
-          }
-        } catch (err) { console.warn(`Attempt ${attempt} failed, retrying...`, err); }
+      const overpassQuery = `
+        [out:json][timeout:25];
+        is_in(${normLat},${normLng})->.a;
+        relation["boundary"="administrative"]["admin_level"="${adminLevel}"](pivot.a);
+        out body;
+        >;
+        out skel qt;
+      `;
+
+      const response = await fetch('https://overpass.opengeofiction.net/api/interpreter', {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(overpassQuery)
+      });
+
+      if (!response.ok) throw new Error("Overpass server error");
+
+      const osmJson = await response.json();
+      if (!osmJson.elements || osmJson.elements.length === 0) {
+        throw new Error(`No level ${adminLevel} territory found at this position.`);
       }
 
-      if (!rawGeojson || rawGeojson.features.length === 0) throw new Error(`Could not construct polygon boundaries for level ${adminLevel} at this location.`);
-      let geojson = shiftGeoJsonLongitude(rawGeojson, lngOffset);
-      const pt = turf.point([latlng.lng, latlng.lat]);
-      let matchedFeature = null;
+      const rawGeojson = osmtogeojson(osmJson);
 
-      for (const feature of geojson.features) {
-        if (feature.geometry && (feature.geometry.type === 'Polygon' || feature.geometry.type === 'MultiPolygon')) {
-          try { if (turf.booleanPointInPolygon(pt, feature)) { matchedFeature = feature; break; } } catch (e) {}
-        }
+      let geojson = {
+        ...rawGeojson,
+        features: rawGeojson.features.filter(f => f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'))
+      };
+
+      if (!geojson.features || geojson.features.length === 0) {
+        throw new Error("Could not construct polygon boundaries for this area.");
       }
-      return matchedFeature || geojson.features[0];
+
+      geojson = shiftGeoJsonLongitude(geojson, lngOffset);
+
+      let newSubLayer = L.geoJSON(geojson, {
+        style: feature => getBoundaryStyle(feature),
+        onEachFeature: (feature, layer) => setupFeatureEvents(feature, layer)
+      });
+
+      subLayersGroup.addLayer(newSubLayer);
+      refreshMapLabels();
     }
 
     function applyColorToFeature(feature, layer, color = fillColorPicker.value) {
@@ -1138,7 +1200,6 @@
       const mapLegendBox = document.getElementById('map-legend');
       const usedColors = [...new Set(Object.values(countryColors))];
       
-      // Update Legend Box Font Size according to userTextScaleMultiplier
       mapLegendBox.style.fontSize = (0.85 * userTextScaleMultiplier) + 'rem';
 
       if (usedColors.length === 0) {
@@ -1202,6 +1263,8 @@
       });
     }
 
+    document.getElementById('clearAllBtn').addEventListener('click', clearAllTerritoriesFromMap);
+
     document.getElementById('resetBtn').addEventListener('click', () => {
       for (let key in countryColors) delete countryColors[key];
       for (let key in countryOpacities) delete countryOpacities[key];
@@ -1226,25 +1289,69 @@
       updateLegendUI();
     });
 
+    // --- CSV EXPORT ---
     document.getElementById('exportCsvBtn').addEventListener('click', () => {
-      const rows = [["Territory", "Legend Value"]];
-      const collectFeatureData = layer => {
+      // Build a lookup of id -> feature by walking every layer once. This is only
+      // used to resolve names/relation ids - the actual list of what to export
+      // comes straight from countryColors below, so every colored territory is
+      // guaranteed to produce exactly one row, no matter how the layers are nested.
+      const featureById = {};
+      const indexLayer = layer => {
+        if (layer.eachLayer) {
+          layer.eachLayer(indexLayer);
+          return;
+        }
         if (!layer.feature) return;
         const id = getFeatureId(layer.feature);
-        if (countryColors[id]) rows.push([getNameForFeature(layer.feature), legendLabels[countryColors[id]] || 'Unlabeled']);
+        if (!(id in featureById)) featureById[id] = layer.feature;
       };
-      if (geojsonLayer) geojsonLayer.eachLayer(collectFeatureData);
-      subLayersGroup.eachLayer(group => group.eachLayer(collectFeatureData));
 
-      if (rows.length <= 1) { alert("No colored territories found to export."); return; }
-      const csvContent = "data:text/csv;charset=utf-8," + rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
-      const encodedUri = encodeURI(csvContent);
+      if (geojsonLayer) geojsonLayer.eachLayer(indexLayer);
+      subLayersGroup.eachLayer(indexLayer);
+
+      const escapeCsv = value => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+
+      const rows = [["Relation ID", "Name", "Legend Value", "Color Code"]];
+
+      Object.keys(countryColors).forEach(id => {
+        const color = countryColors[id];
+        if (!color || color === 'none' || color === '#ffffff' || color === '') return;
+
+        const feature = featureById[id];
+        const name = feature ? getNameForFeature(feature) : id;
+        const relationId = feature ? (getRelationId(feature) || '') : '';
+        const legendValue = legendLabels[color] || '';
+
+        rows.push([relationId, name, legendValue, color]);
+      });
+
+      // Build the raw CSV text (no data: URI here - see below for why).
+      const csvContent = rows.map(row => row.map(escapeCsv).join(",")).join("\n");
+
+      // IMPORTANT: don't wrap this in a "data:text/csv,..." URI passed through
+      // encodeURI(). encodeURI() intentionally leaves '#' unescaped (it's a
+      // valid URI character reserved for fragments), and hex color codes are
+      // full of '#'. The moment the string hits the first '#', the browser
+      // treats everything after it as a URL fragment and silently drops it
+      // from the downloaded file - which looks exactly like "only one row,
+      // and even that row's color code is missing". A Blob + object URL has
+      // no such character restrictions.
+      // Prepend a UTF-8 BOM. Without it, Excel (and some other spreadsheet
+      // apps) can't reliably tell the file is UTF-8 and fall back to
+      // Windows-1252, which mangles any non-ASCII characters in names
+      // (e.g. "西城国" turning into "è¥¿åŸŽå›½"). The BOM fixes that.
+      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+      const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", "chartogf-data.csv");
+      link.setAttribute("href", blobUrl);
+
+      // Update download file naming convention
+      link.setAttribute("download", "chartogf-export.csv"); 
+      
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
     });
 
     // CROP BOX & EXPORT ENGINE WITH DOM SCALING
@@ -1274,7 +1381,6 @@
       exportScaleVal.textContent = e.target.value + '%';
     });
 
-    // Applies CSS container scaling on slider release while maintaining identical geographical bounds
     exportScaleSlider.addEventListener('change', (e) => {
       const scaleFactor = parseInt(e.target.value, 10) / 100; 
       applyMapScale(scaleFactor);
@@ -1285,15 +1391,12 @@
       
       currentMapScale = scaleFactor;
 
-      // Expand DOM layer mathematically and visually pull it back using CSS transform
       container.style.width = `${scaleFactor * 100}%`;
       container.style.height = `${scaleFactor * 100}%`;
       container.style.transform = `scale(${1 / scaleFactor})`;
 
-      // Anchor geographic target specifically around current crop box center if cropping, otherwise baseline center
       let targetCenter = (isCroppingActive && cropGeoBounds) ? cropGeoBounds.getCenter() : baseMapCenter;
 
-      // Adjust Leaflet's zoom level proportionally to offset container expansion
       if (baseZoomLevel !== null && targetCenter !== null) {
         const zoomDelta = Math.log2(scaleFactor);
         map.setView(targetCenter, baseZoomLevel + zoomDelta, { animate: false });
@@ -1301,12 +1404,10 @@
 
       map.invalidateSize({pan: false, animate: false});
 
-      // Recenter view and crop box around the geographic center
       if (isCroppingActive && cropGeoBounds) {
         recenterCropBoxInViewport();
       }
 
-      // Rerender all styles dynamically to maintain stroke clarity on scaled canvas
       const applyStyles = layer => layer.setStyle(getBoundaryStyle(layer.feature, scaleFactor));
       if (geojsonLayer) geojsonLayer.eachLayer(applyStyles);
       subLayersGroup.eachLayer(group => group.eachLayer(applyStyles));
@@ -1315,7 +1416,6 @@
       updateCropBoxDOMPosition();
     }
 
-    // Helper: Recenter view directly around the existing crop box center upon scale shift
     function recenterCropBoxInViewport() {
       if (!cropGeoBounds) return;
       
@@ -1339,18 +1439,15 @@
       cropGeoBounds = L.latLngBounds(nwLatLng, seLatLng);
     }
 
-    // Direct capture button that crops specifically based on the real time scaled box
     document.getElementById('downloadPngBtn').addEventListener('click', () => {
       const btn = document.getElementById('downloadPngBtn');
       btn.textContent = 'Rendering...';
       btn.disabled = true;
       
-      // Hide crop guidelines before capturing
       cropBox.style.display = 'none';
 
       const container = document.getElementById('map-container');
       const oldTransform = container.style.transform;
-      // Revert the container back so it takes its full physical high-res width before capture
       container.style.transform = 'none'; 
 
       const crop = {
@@ -1455,7 +1552,6 @@
       isCroppingActive = true;
       document.body.classList.add('crop-active-mode');
 
-      // Record baseline map view parameters before scale adjustments
       baseZoomLevel = map.getZoom();
       baseMapCenter = map.getCenter();
 
@@ -1463,7 +1559,6 @@
       exportControls.style.display = 'flex';
       adjustLabelsBtn.disabled = true;
 
-      // When starting the crop, it uses the map wrapper native size 
       const w = mapWrapper.offsetWidth;
       const h = mapWrapper.offsetHeight;
       const boxW = w * 0.85;
@@ -1562,7 +1657,6 @@
 
     function onMouseMove(e) {
       if (!activeDrag) return;
-      // Account for the map scale when registering interactions
       const dx = (e.clientX - startX) / currentMapScale;
       const dy = (e.clientY - startY) / currentMapScale;
       let l = startLeft, t = startTop, w = startW, h = startH;
