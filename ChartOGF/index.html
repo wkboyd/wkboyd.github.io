@@ -498,7 +498,8 @@
     function convert3857To4326Coord(coord) {
       var x = coord[0];
       var y = coord[1];
-      if (Math.abs(x) > 180 || Math.abs(y) > 90) {
+      // Using > 1000 for meters check ensures degree values > 180 (like 190° E) are preserved and not incorrectly treated as Web Mercator meters
+      if (Math.abs(x) > 1000 || Math.abs(y) > 1000) {
         var rMajor = 6378137.0;
         var lng = (x / rMajor) * (180 / Math.PI);
         var lat = (2 * Math.atan(Math.exp(y / rMajor)) - Math.PI / 2) * (180 / Math.PI);
@@ -1326,14 +1327,14 @@
           let defaultSubLevel = currentLevel + 1;
           if (currentLevel === 2) defaultSubLevel = 4;
           else if (currentLevel === 4) defaultSubLevel = 6;
-          defaultSubLevel = Math.min(8, Math.max(3, defaultSubLevel));
+          defaultSubLevel = Math.min(9, Math.max(3, defaultSubLevel));
 
           const adminSelect = document.createElement('select');
           adminSelect.className = 'context-select';
-          [3, 4, 5, 6, 7, 8].forEach(lvl => {
+          [3, 4, 5, 6, 7, 8, 9].forEach(lvl => {
             const opt = document.createElement('option');
             opt.value = lvl;
-            opt.textContent = `Level ${lvl} ${lvl === 4 ? '(State/Province)' : lvl === 6 ? '(County/District)' : ''}`;
+            opt.textContent = `Level ${lvl} ${lvl === 4 ? '(State/Province)' : lvl === 6 ? '(County/District)' : lvl === 9 ? '(Neighborhood/Locality)' : ''}`;
             if (lvl === defaultSubLevel) opt.selected = true;
             adminSelect.appendChild(opt);
           });
@@ -1427,10 +1428,10 @@
 
       const adminSelect = document.createElement('select');
       adminSelect.className = 'context-select';
-      [2, 3, 4, 5, 6, 7, 8].forEach(lvl => {
+      [2, 3, 4, 5, 6, 7, 8, 9].forEach(lvl => {
         const opt = document.createElement('option');
         opt.value = lvl;
-        opt.textContent = `Level ${lvl} ${lvl === 2 ? '(Country)' : lvl === 4 ? '(State/Province)' : ''}`;
+        opt.textContent = `Level ${lvl} ${lvl === 2 ? '(Country)' : lvl === 4 ? '(State/Province)' : lvl === 9 ? '(Neighborhood/Locality)' : ''}`;
         if (lvl === 2) opt.selected = true;
         adminSelect.appendChild(opt);
       });
